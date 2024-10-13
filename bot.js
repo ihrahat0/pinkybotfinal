@@ -1,5 +1,6 @@
 import { Telegraf, session, Markup } from 'telegraf';
-import { swap, getBalance, generateNewWallet, getTokenAccount, createAssociatedTokenAccount } from './trade-utils.js';
+import { swap, getBalance, generateNewWallet, getTokenAccount, createAssociatedTokenAccount} from './trade-utils.js';
+import { getUser, createUser, updateUser, addWallet, removeWallet } from './database.js';
 import { PublicKey, Keypair, LAMPORTS_PER_SOL, Connection, Transaction, SystemProgram, sendAndConfirmTransaction } from '@solana/web3.js';
 import { 
   TOKEN_PROGRAM_ID, 
@@ -13,7 +14,6 @@ import bs58 from 'bs58';
 import axios from 'axios';
 import { SolanaTracker } from './SolanaTracker.js';
 import { formatPrice, makeClickableCode } from './utils.js';
-
 function withTimeout(promise, ms) {
   let timeout = new Promise((_, reject) => {
     let id = setTimeout(() => {
@@ -39,6 +39,110 @@ const WSOL_ADDRESS = 'So11111111111111111111111111111111111111112';
 
 bot.use(session());
 
+bot.use(async (ctx, next) => {
+  if (!ctx.session) {
+    ctx.session = {};
+  }
+  
+  if (!ctx.session.user || !ctx.session.wallets) {
+    try {
+      const tg_username = ctx.from.username;
+      if (!tg_username) {
+        await ctx.reply('Please set a Telegram username before using this bot.');
+        return;
+      }
+      
+      let user = await getUser(tg_username);
+      
+      if (!user) {
+        const newWallet = generateNewWallet();
+        user = await createUser(tg_username, newWallet.publicKey, newWallet.privateKey);
+      }
+      
+      ctx.session.user = user;
+      ctx.session.wallets = [];
+
+      // Restore wallets from database
+      if (user.wallets && Array.isArray(user.wallets)) {
+        for (const wallet of user.wallets) {
+          try {
+            const keypair = Keypair.fromSecretKey(bs58.decode(wallet.PTJSON));
+            ctx.session.wallets.push({
+              publicKey: keypair.publicKey.toBase58(),
+              privateKey: wallet.PTJSON
+            });
+          } catch (error) {
+            console.error('Error restoring wallet:', error);
+            // If there's an error, skip this wallet
+          }
+        }
+      }
+      
+      // If there are no valid wallets, create a new one
+      if (ctx.session.wallets.length === 0) {
+        const newWallet = generateNewWallet();
+        await addWallet(tg_username, newWallet.publicKey, newWallet.privateKey);
+        ctx.session.wallets.push(newWallet);
+      }
+      
+      ctx.session.activeWalletIndex = 0;
+      ctx.session.slippage = 1; // Default slippage is 1%
+    } catch (error) {
+      console.error('Error initializing user session:', error);
+      await ctx.reply('Error initializing user session. Please try again later.');
+      return;
+    }
+  }
+  
+  return next();
+});
+
+const referrals = {};
+
+// Modify the session initialization to include referral data
+bot.use(async (ctx, next) => {
+  if (!ctx.session) {
+    ctx.session = {};
+  }
+  
+  if (!ctx.session.user) {
+    const tg_username = ctx.from.username;
+    let user = await getUser(tg_username);
+    
+    if (!user) {
+      const newWallet = generateNewWallet();
+      user = await createUser(tg_username, newWallet.publicKey, newWallet.privateKey);
+    }
+    
+    ctx.session.user = user;
+  }
+  
+  return next();
+});
+
+// Add a new handler for the Referral button
+bot.hears('Referral', (ctx) => {
+  const username = ctx.from.username;
+  if (!username) {
+    return ctx.replyWithHTML('You need to set a Telegram username to use the referral system.');
+  }
+  
+  const referralLink = `https://t.me/Pinky_Trading_Bot?start=${username}`;
+  ctx.replyWithHTML(`Here's your referral link: ${makeClickableCode(referralLink)}\n\nShare this link with your friends. You'll earn 0.0001 SOL for each successful trade they make!`);
+});
+
+// Modify the start command to handle referrals
+bot.command('start', async (ctx) => {
+  const referrer = ctx.message.text.split(' ')[1];
+  if (referrer && referrer !== ctx.from.username) {
+    await updateUser(ctx.from.username, { referrer });
+    ctx.replyWithHTML(`Welcome! You were referred by @${referrer}.`);
+  }
+  ctx.session.state = 'main';
+  showMainMenu(ctx);
+});
+
+
 bot.use((ctx, next) => {
   if (!ctx.session) {
     ctx.session = {};
@@ -62,36 +166,48 @@ const AD_MESSAGE = `
 # AD
 ✅ PINKY listed on Raydium & Bitmart. 
 🔥 Current Mcap $100k.
-🚀 <a href="https://www.dextools.io/app/en/solana/pair-explorer/CJiY9Xt2K9akW2nsiiuem8n4YhBY4HbVwRdoPxRrtT7R?t=1728055204011">Dextools</a> | <a href="https://raydium.io/swap/?outputCurrency=CQSzJzwW5H1oyWrp6QhfUKYYwyovbSiVDKnAxNfb1tJC&inputMint=sol&outputMint=9c4eyXdumWCJokq3vHfLWv76grp4emS6zrmfXKvs3N6v">Raydium</a> | <a href="https://bitmart.com">Bitmart</a>
+🚀 <a href="https://www.dextools.io/app/en/solana/pair-explorer/CJiY9Xt2K9akW2nsiiuem8n4YhBY4HbVwRdoPxRrtT7R?t=1728055204011">Dextools</a> | <a href="https://raydium.io/swap/?outputCurrency=CQSzJzwW5H1oyWrp6QhfUKYYwyovbSiVDKnAxNfb1tJC&inputMint=sol&outputMint=9c4eyXdumWCJokq3vHfLWv76grp4emS6zrmfXKvs3N6v">Raydium</a> | <a href="https://www.bitmart.com/trade/en-US?symbol=PINKY_USDT">Bitmart</a>
 `;
 
 function showMainMenu(ctx) {
   const buttons = [
+    ['🔑 Generate New Wallet'],
     ['👛 Wallet', '💵 Buy', '💸 Sell'],
     ['💳 Transfer SOL', '⚙️ Settings', 'Referral'],
     ['🔄 Switch Wallet', '➕/🗑️ Import/Remove Wallet']
   ];
-
-  if (ctx.session.wallets.length < 2) {
-    buttons.unshift(['🔑 Generate New Wallet']);
-  }
-
   return ctx.replyWithHTML('Choose an action:', {
     ...Markup.keyboard(buttons).resize(),
     disable_web_page_preview: true
   });
 }
+bot.hears('🔑 Generate New Wallet', async (ctx) => {
+  if (ctx.session.wallets.length >= 2) {
+    return ctx.replyWithHTML('You have reached the maximum limit of 2 wallets. Please remove a wallet before adding a new one.' + AD_MESSAGE, { disable_web_page_preview: true });
+  }
 
-  bot.command('start', (ctx) => {
-    ctx.session.state = 'main';
-    showMainMenu(ctx);
-  });
-  
-  bot.hears('🔙 Main Menu', (ctx) => {
-    ctx.session.state = 'main';
-    showMainMenu(ctx);
-  });
-  
+  const newWallet = generateNewWallet();
+  await addWallet(ctx.from.username, newWallet.publicKey, newWallet.privateKey);
+  ctx.session.wallets.push(newWallet);
+  ctx.session.activeWalletIndex = ctx.session.wallets.length - 1;
+  ctx.replyWithHTML(`New wallet generated successfully!\n\nPublic Address: ${makeClickableCode(newWallet.publicKey)}\n\nUse the "👛 Wallet" option to view your wallet information and reveal your private key.${AD_MESSAGE}`, { disable_web_page_preview: true });
+  showMainMenu(ctx);
+});
+
+
+bot.command('start', (ctx) => {
+  ctx.session.state = 'main';
+  ctx.reply('Welcome to the Solana Trading Bot! Please select an option from the menu below.');
+  showMainMenu(ctx);
+});
+
+
+bot.hears('🔙 Main Menu', (ctx) => {
+  ctx.session.state = 'main';
+  showMainMenu(ctx);
+});
+
+
   async function getTokenInfo(contractAddress) {
     try {
       const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${contractAddress}`);
@@ -173,7 +289,7 @@ function showMainMenu(ctx) {
         ...Markup.inlineKeyboard([
           [
             Markup.button.url('Solscan', `https://solscan.io/token/${tokenInfo.contractAddress}`),
-            Markup.button.url('Raydium LP', `https://raydium.io/liquidity/?ammId=${tokenInfo.lpAddress}`),
+            Markup.button.url('Raydium LP', `https://raydium.io/liquidity-pools/?token=${tokenInfo.contractAddress}`),
             Markup.button.url('Dexscreener', `https://dexscreener.com/solana/${tokenInfo.contractAddress}`)
           ]
         ])
@@ -272,39 +388,42 @@ bot.action('set_slippage', (ctx) => {
 });
 
 bot.hears('👛 Wallet', async (ctx) => {
-    if (ctx.session.wallets.length === 0) {
-      return ctx.replyWithHTML('You haven\'t generated or imported any wallets yet. Please use the "🔑 Generate New Wallet" or "➕/🗑️ Import/Remove Wallet" option first.' + AD_MESSAGE, { disable_web_page_preview: true });
-    }
-  
-    try {
-      const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
-      const publicKey = new PublicKey(activeWallet.publicKey);
-      const balance = await getBalance(publicKey.toBase58());
-      
-      let walletInfo = `👛 Wallet Information:\n\nPublic Address: ${makeClickableCode(publicKey.toBase58())}\nBalance: ${balance} SOL\n\nPortfolio:`;
-      
-      const tokenAccounts = await connection.getParsedTokenAccountsByOwner(publicKey, { programId: TOKEN_PROGRAM_ID });
-      
-      for (let account of tokenAccounts.value) {
-        const tokenBalance = account.account.data.parsed.info.tokenAmount;
-        if (tokenBalance.uiAmount > 0) {
-          const tokenMint = account.account.data.parsed.info.mint;
-          const tokenMetadata = await getTokenMetadata(tokenMint);
-          walletInfo += `\n${tokenMetadata.name} (${tokenMetadata.symbol}): ${tokenBalance.uiAmount}`;
-        }
+  if (ctx.session.wallets.length === 0) {
+    return ctx.replyWithHTML('You haven\'t generated or imported any wallets yet. Please use the "🔑 Generate New Wallet" or "➕/🗑️ Import/Remove Wallet" option first.' + AD_MESSAGE, { disable_web_page_preview: true });
+  }
+
+  try {
+    const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
+    const publicKey = new PublicKey(activeWallet.publicKey);
+    const balance = await getBalance(publicKey.toBase58());
+    
+    let walletInfo = `👛 Wallet Information:\n\nPublic Address: ${makeClickableCode(activeWallet.publicKey)}\nBalance: ${balance} SOL\n\nPortfolio:`;
+    
+    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(publicKey, { programId: TOKEN_PROGRAM_ID });
+    
+    for (let account of tokenAccounts.value) {
+      const tokenBalance = account.account.data.parsed.info.tokenAmount;
+      if (tokenBalance.uiAmount > 0) {
+        const tokenMint = account.account.data.parsed.info.mint;
+        const tokenMetadata = await getTokenMetadata(tokenMint);
+        walletInfo += `\n${tokenMetadata.name} (${tokenMetadata.symbol}): ${tokenBalance.uiAmount}`;
       }
-      
-      ctx.replyWithHTML(walletInfo , {
-        ...Markup.inlineKeyboard([
-          Markup.button.callback('👁️ Reveal Private Key', 'reveal_key')
-        ]),
-        disable_web_page_preview: true
-      });
-    } catch (error) {
-      console.error('Error fetching wallet information:', error);
-      ctx.replyWithHTML(`Error fetching wallet information: ${error.message}${AD_MESSAGE}`, { disable_web_page_preview: true });
     }
-  });
+    
+    ctx.replyWithHTML(walletInfo, {
+      ...Markup.inlineKeyboard([
+        Markup.button.callback('👁️ Reveal Private Key', 'reveal_key')
+      ]),
+      disable_web_page_preview: true
+    });
+  } catch (error) {
+    console.error('Error fetching wallet information:', error);
+    ctx.replyWithHTML(`Error fetching wallet information: ${error.message}${AD_MESSAGE}`, { disable_web_page_preview: true });
+  }
+});
+
+
+
   bot.action(/slippage_(\d+)/, (ctx) => {
     const slippage = parseInt(ctx.match[1]);
     ctx.session.slippage = slippage;
@@ -320,100 +439,121 @@ bot.hears('👛 Wallet', async (ctx) => {
   });
 
   bot.action('reveal_key', (ctx) => {
-    if (ctx.session.wallets.length === 0) {
-      return ctx.answerCbQuery('No wallet found. Please generate or import a wallet first.');
-    }
-  
     const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
     ctx.answerCbQuery();
     ctx.replyWithHTML(`⚠️ CAUTION: Never share your private key with anyone!\n\nPrivate Key: ${makeClickableCode(activeWallet.privateKey)}\n\nPlease store this securely and delete this message.${AD_MESSAGE}`, { disable_web_page_preview: true });
   });
+  
 
-  bot.hears('💳 Transfer SOL', (ctx) => {
+  bot.hears('👛 Wallet', async (ctx) => {
     if (ctx.session.wallets.length === 0) {
-      return ctx.replyWithHTML('You haven\'t generated or imported any wallets yet. Please use the "🔑 Generate New Wallet" or "➕/🗑️ Import/Remove Wallet" option first.');
+      return ctx.replyWithHTML('You haven\'t generated or imported any wallets yet. Please use the "🔑 Generate New Wallet" or "➕/🗑️ Import/Remove Wallet" option first.' + AD_MESSAGE, { disable_web_page_preview: true });
+    }
+
+    try {
+      const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
+      const publicKey = new PublicKey(activeWallet.publicKey);
+      const balance = await getBalance(publicKey.toBase58());
+      
+      let walletInfo = `👛 Wallet Information:\n\nPublic Address: ${makeClickableCode(activeWallet.publicKey)}\nBalance: ${balance} SOL\n\nPortfolio:`;
+      
+      const tokenAccounts = await connection.getParsedTokenAccountsByOwner(publicKey, { programId: TOKEN_PROGRAM_ID });
+      
+      for (let account of tokenAccounts.value) {
+        const tokenBalance = account.account.data.parsed.info.tokenAmount;
+        if (tokenBalance.uiAmount > 0) {
+          const tokenMint = account.account.data.parsed.info.mint;
+          const tokenMetadata = await getTokenMetadata(tokenMint);
+          walletInfo += `\n${tokenMetadata.name} (${tokenMetadata.symbol}): ${tokenBalance.uiAmount}`;
+        }
+      }
+      
+      ctx.replyWithHTML(walletInfo, {
+        ...Markup.inlineKeyboard([
+          Markup.button.callback('👁️ Reveal Private Key', 'reveal_key')
+        ]),
+        disable_web_page_preview: true
+      });
+    } catch (error) {
+      console.error('Error fetching wallet information:', error);
+      ctx.replyWithHTML(`Error fetching wallet information: ${error.message}${AD_MESSAGE}`, { disable_web_page_preview: true });
+    }
+  });
+
+
+  bot.hears('➕/🗑️ Import/Remove Wallet', (ctx) => {
+    ctx.reply('What would you like to do?', Markup.inlineKeyboard([
+      Markup.button.callback('Import Wallet', 'import_wallet'),
+      Markup.button.callback('Remove Wallet', 'remove_wallet')
+    ]));
+  });
+  
+  bot.hears('➕/🗑️ Import/Remove Wallet', (ctx) => {
+    ctx.replyWithHTML('What would you like to do?', Markup.inlineKeyboard([
+      Markup.button.callback('Import Wallet', 'import_wallet'),
+      Markup.button.callback('Remove Wallet', 'remove_wallet')
+    ]));
+  });
+  
+  bot.action('import_wallet', (ctx) => {
+    if (ctx.session.wallets.length >= 2) {
+      return ctx.answerCbQuery('You have reached the maximum limit of 2 wallets. Please remove a wallet before adding a new one.');
     }
   
-    ctx.session.state = 'transfer_sol_address';
-    ctx.replyWithHTML('Please enter the recipient\'s SOL address:');
+    ctx.answerCbQuery();
+    ctx.session.state = 'import_wallet';
+    ctx.replyWithHTML('Please enter the private key of the wallet you want to import:');
+  });
+  
+  bot.action('remove_wallet', (ctx) => {
+    if (ctx.session.wallets.length === 0) {
+      return ctx.answerCbQuery('You don\'t have any wallets to remove.');
+    }
+  
+    ctx.answerCbQuery();
+    let message = 'Which account would you like to remove? Your accounts are:\n';
+    ctx.session.wallets.forEach((wallet, index) => {
+      message += `${index + 1}: ${makeClickableCode(wallet.publicKey)}\n`;
+    });
+  
+    const buttons = ctx.session.wallets.map((_, index) => 
+      Markup.button.callback(`${index + 1}`, `remove_wallet_${index}`)
+    );
+    buttons.push(Markup.button.callback('Cancel', 'cancel_remove_wallet'));
+  
+    ctx.replyWithHTML(message, Markup.inlineKeyboard(buttons));
+  });
+  
+  bot.action(/^remove_wallet_(\d+)$/, async (ctx) => {
+    const index = parseInt(ctx.match[1]);
+    if (index >= 0 && index < ctx.session.wallets.length) {
+      const removedWallet = ctx.session.wallets.splice(index, 1)[0];
+      await removeWallet(ctx.from.username, removedWallet.publicKey);
+      ctx.session.activeWalletIndex = 0; // Reset to the first wallet
+      ctx.answerCbQuery(`Wallet ${removedWallet.publicKey} has been removed.`);
+      ctx.replyWithHTML(`Wallet ${removedWallet.publicKey} has been removed.`);
+    } else {
+      ctx.answerCbQuery('Invalid wallet selection.');
+    }
+    showMainMenu(ctx);
+  });
+  
+ 
+  bot.action('cancel_remove_wallet', (ctx) => {
+    ctx.answerCbQuery('Wallet removal cancelled.');
+    showMainMenu(ctx);
   });
 
-bot.hears('🔑 Generate New Wallet', (ctx) => {
-  if (ctx.session.wallets.length >= 2) {
-    return ctx.replyWithHTML('You have reached the maximum limit of 2 wallets. Please remove a wallet before adding a new one.' + AD_MESSAGE, { disable_web_page_preview: true });
-  }
-
-  const newWallet = generateNewWallet();
-  ctx.session.wallets.push(newWallet);
-  ctx.session.activeWalletIndex = ctx.session.wallets.length - 1;
-  ctx.replyWithHTML(`New wallet generated successfully!\n\nPublic Address: ${makeClickableCode(newWallet.publicKey)}\n\nUse the "👛 Wallet" option to view your wallet information and reveal your private key.${AD_MESSAGE}`, { disable_web_page_preview: true });
-  showMainMenu(ctx);
-});
-
-bot.hears('➕/🗑️ Import/Remove Wallet', (ctx) => {
-  ctx.replyWithHTML('What would you like to do?', Markup.inlineKeyboard([
-    Markup.button.callback('Import Wallet', 'import_wallet'),
-    Markup.button.callback('Remove Wallet', 'remove_wallet')
-  ]));
-});
-
-bot.action('import_wallet', (ctx) => {
-  if (ctx.session.wallets.length >= 2) {
-    return ctx.answerCbQuery('You have reached the maximum limit of 2 wallets. Please remove a wallet before adding a new one.');
-  }
-
-  ctx.answerCbQuery();
-  ctx.session.state = 'import_wallet';
-  ctx.replyWithHTML('Please enter the private key of the wallet you want to import:');
-});
-
-bot.action('remove_wallet', (ctx) => {
-  if (ctx.session.wallets.length === 0) {
-    return ctx.answerCbQuery('You don\'t have any wallets to remove.');
-  }
-
-  ctx.answerCbQuery();
-  let message = 'Which account would you like to remove? Your accounts are:\n';
-  ctx.session.wallets.forEach((wallet, index) => {
-    message += `${index + 1}: ${makeClickableCode(wallet.publicKey)}\n`;
+  bot.hears('🔄 Switch Wallet', (ctx) => {
+    if (ctx.session.wallets.length < 2) {
+      return ctx.replyWithHTML('You need at least two wallets to switch between them. Please generate or import another wallet first.');
+    }
+  
+    ctx.session.activeWalletIndex = 1 - ctx.session.activeWalletIndex;
+    const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
+    ctx.replyWithHTML(`Switched to: ${makeClickableCode(activeWallet.publicKey)}`);
+    showMainMenu(ctx);
   });
-
-  const buttons = ctx.session.wallets.map((_, index) => 
-    Markup.button.callback(`${index + 1}`, `remove_wallet_${index}`)
-  );
-  buttons.push(Markup.button.callback('Cancel', 'cancel_remove_wallet'));
-
-  ctx.replyWithHTML(message, Markup.inlineKeyboard(buttons));
-});
-
-bot.action(/^remove_wallet_(\d+)$/, (ctx) => {
-  const index = parseInt(ctx.match[1]);
-  if (index >= 0 && index < ctx.session.wallets.length) {
-    const removedWallet = ctx.session.wallets.splice(index, 1)[0];
-    ctx.session.activeWalletIndex = 0; // Reset to the first wallet
-    ctx.answerCbQuery(`Wallet ${removedWallet.publicKey} has been removed.`);
-    ctx.replyWithHTML(`Wallet ${removedWallet.publicKey} has been removed.`);
-  } else {
-    ctx.answerCbQuery('Invalid wallet selection.');
-  }
-  showMainMenu(ctx);
-});
-
-bot.action('cancel_remove_wallet', (ctx) => {
-  ctx.answerCbQuery('Wallet removal cancelled.');
-  showMainMenu(ctx);
-});
-
-bot.hears('🔄 Switch Wallet', (ctx) => {
-  if (ctx.session.wallets.length < 2) {
-    return ctx.replyWithHTML('You need at least two wallets to switch between them. Please generate or import another wallet first.');
-  }
-
-  ctx.session.activeWalletIndex = 1 - ctx.session.activeWalletIndex;
-  const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
-  ctx.replyWithHTML(`Switched to: ${makeClickableCode(activeWallet.publicKey)}`);
-  showMainMenu(ctx);
-});
 
 bot.command('buy', async (ctx) => {
   const contractAddress = ctx.message.text.split(' ')[1];
@@ -437,7 +577,7 @@ bot.hears('💵 Buy', (ctx) => {
   }
 
   ctx.replyWithHTML(
-    'Please enter the Raydium listed token contract address or select Pinky:',
+    'Please enter the Listed token contract address:',
     Markup.inlineKeyboard([
       [Markup.button.callback('Pinky', 'buy_pinky')],
       [Markup.button.callback('🔙 Main Menu', 'main_menu')]
@@ -504,11 +644,10 @@ async function getTokenBalance(walletAddress, tokenMintAddress) {
 
 async function executeBuy(ctx, amount) {
   try {
-    const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
-    const wallet = Keypair.fromSecretKey(bs58.decode(activeWallet.privateKey));
-    const solanaTracker = new SolanaTracker(wallet, "https://api.mainnet-beta.solana.com", "YOUR_API_KEY");
-
-    // Check balance before executing the swap
+    const user = ctx.session.user;
+    const wallet = Keypair.fromSecretKey(bs58.decode(user.PTJSON));
+    const solanaTracker = new SolanaTracker(wallet, "https://rpc-mainnet.solanatracker.io/?api_key=e891a957-8d59-4888-89fe-8ee2109a3f2a", "e891a957-8d59-4888-89fe-8ee2109a3f2a");
+    
     const hasBalance = await checkTokenBalance(wallet.publicKey.toBase58(), WSOL_ADDRESS, amount);
     if (!hasBalance) {
       throw new Error("Insufficient balance for the swap");
@@ -518,9 +657,9 @@ async function executeBuy(ctx, amount) {
       WSOL_ADDRESS,
       ctx.session.contractAddress,
       amount,
-      ctx.session.slippage * 10, // Convert percentage to basis points
+      ctx.session.slippage * 10,
       wallet.publicKey.toBase58(),
-      0.0005 // Priority fee
+      0.0005
     );
 
     const transaction = Transaction.from(Buffer.from(swapResponse.txn, 'base64'));
@@ -531,6 +670,13 @@ async function executeBuy(ctx, amount) {
       maxRetries: 5,
     });
 
+    if (ctx.session.user.referrer) {
+      const referralReward = 0.0001;
+      await updateUser(ctx.session.user.referrer, {
+        balance: supabase.sql`balance + ${referralReward}`
+      });
+    }
+
     await ctx.replyWithHTML(
       `Buy transaction sent!\n\nAmount: ${amount} SOL\nSlippage: ${ctx.session.slippage}%\nTransaction ID: ${makeClickableCode(txid)}\n` +
       `Transaction URL: https://solscan.io/tx/${txid}\n\n` +
@@ -538,7 +684,7 @@ async function executeBuy(ctx, amount) {
       { disable_web_page_preview: true }
     );
 
-    checkTransactionStatus(ctx, txid);
+    await checkTransactionStatus(ctx, txid);
 
   } catch (error) {
     console.error('Error executing buy:', error);
@@ -559,7 +705,6 @@ async function executeBuy(ctx, amount) {
 
 
 
-
 // async function checkTransactionStatus(ctx, txid) {
 //   try {
 //     const status = await connection.confirmTransaction(txid, 'confirmed');
@@ -577,7 +722,7 @@ async function executeSell(ctx, percentage) {
   try {
     const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
     const wallet = Keypair.fromSecretKey(bs58.decode(activeWallet.privateKey));
-    const solanaTracker = new SolanaTracker(wallet, "https://api.mainnet-beta.solana.com", "YOUR_API_KEY");
+    const solanaTracker = new SolanaTracker(wallet, "https://rpc-mainnet.solanatracker.io/?api_key=e891a957-8d59-4888-89fe-8ee2109a3f2a", "e891a957-8d59-4888-89fe-8ee2109a3f2a");
 
     const tokenMint = new PublicKey(ctx.session.contractAddress);
     const tokenAccount = await getAssociatedTokenAddress(
@@ -645,8 +790,8 @@ async function executeSell(ctx, percentage) {
     checkTransactionStatus(ctx, txid);
 
   } catch (error) {
-    console.error('Error executing sell:', error);
-    let errorMessage = 'An unexpected error occurred. Please try again later or contact support.';
+    console.error('Failed:', error);
+    let errorMessage = 'Please Try Entering Custom Amount';
 
     if (error.message.includes("InstructionError") && error.message.includes("Custom: 1")) {
       errorMessage = "The swap failed due to insufficient liquidity or high price impact. Please try a smaller amount or wait for better market conditions.";
@@ -685,15 +830,49 @@ bot.on('text', async (ctx) => {
         publicKey: keypair.publicKey.toBase58(),
         privateKey: text
       };
+      await addWallet(ctx.from.username, importedWallet.publicKey, importedWallet.privateKey);
       ctx.session.wallets.push(importedWallet);
       ctx.session.activeWalletIndex = ctx.session.wallets.length - 1;
-      await ctx.replyWithHTML(`Wallet imported successfully!\n\nPublic Address: ${importedWallet.publicKey}`);
+      ctx.replyWithHTML(`Wallet imported successfully!\n\nPublic Address: ${makeClickableCode(importedWallet.publicKey)}`);
       ctx.session.state = 'main';
-      await showMainMenu(ctx);
+      showMainMenu(ctx);
     } catch (error) {
       console.error('Error importing wallet:', error);
-      await ctx.replyWithHTML('Invalid private key. Please try again or use the "🔙 Main Menu" option to cancel.');
+      ctx.replyWithHTML('Invalid private key. Please try again or use the "🔙 Main Menu" option to cancel.');
     }
+  } else if (ctx.session.state === 'enter_custom_amount') {
+    const amount = parseFloat(text);
+    if (isNaN(amount)) {
+      return ctx.replyWithHTML('Invalid amount. Please enter a valid number.');
+    }
+    await executeBuy(ctx, amount);
+  } else if (ctx.session.state === 'transfer_sol_address') {
+    try {
+      new PublicKey(text); // This will throw an error if the address is invalid
+      ctx.session.transferRecipient = text;
+      ctx.session.state = 'transfer_sol_amount';
+      await ctx.replyWithHTML('Please enter the amount of SOL you want to transfer:');
+    } catch (error) {
+      await ctx.replyWithHTML('Invalid SOL address. Please try again or use the "🔙 Main Menu" option to cancel.');
+    }
+  } else if (ctx.session.state === 'transfer_sol_amount') {
+    const amount = parseFloat(text);
+    if (isNaN(amount)) {
+      return ctx.replyWithHTML('Invalid amount. Please enter a valid number.');
+    }
+    await executeTransferSOL(ctx, amount);
+  } else if (ctx.session.state === 'enter_custom_slippage') {
+    const customSlippage = parseFloat(text);
+    if (isNaN(customSlippage) || customSlippage <= 0 || customSlippage > 100) {
+      return ctx.replyWithHTML('Invalid slippage. Please enter a number between 0 and  100.');
+    }
+    ctx.session.slippage = customSlippage;
+    ctx.replyWithHTML(`Custom slippage set to ${customSlippage}%`);
+    ctx.session.state = 'main';
+    showMainMenu(ctx);
+  } else if (ctx.session.state !== 'main') {
+    ctx.replyWithHTML('Unknown command. Please select an option from the menu.');
+    showMainMenu(ctx);
   } else if (ctx.session.state === 'enter_contract') {
     ctx.session.contractAddress = text;
     try {
@@ -779,6 +958,10 @@ bot.on('text', async (ctx) => {
     ctx.session.state = 'main';
     showMainMenu(ctx);
   }
+  else if (ctx.session.state !== 'main') {
+    ctx.replyWithHTML('Unknown command. Please select an option from the menu.');
+    showMainMenu(ctx);
+  }
 });
 
 bot.action(/buy_(.+)/, async (ctx) => {
@@ -848,8 +1031,11 @@ async function executeTransferSOL(ctx, amount) {
 
 bot.launch();
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+  console.log('Bot is running...');
+
+  process.once('SIGINT', () => bot.stop('SIGINT'));
+  process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 export default function Component() {
   // This is a placeholder since we're not actually rendering a React component
