@@ -644,10 +644,11 @@ async function getTokenBalance(walletAddress, tokenMintAddress) {
 
 async function executeBuy(ctx, amount) {
   try {
-    const user = ctx.session.user;
-    const wallet = Keypair.fromSecretKey(bs58.decode(user.PTJSON));
+    const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
+    const wallet = Keypair.fromSecretKey(bs58.decode(activeWallet.privateKey));
     const solanaTracker = new SolanaTracker(wallet, "https://rpc-mainnet.solanatracker.io/?api_key=e891a957-8d59-4888-89fe-8ee2109a3f2a", "e891a957-8d59-4888-89fe-8ee2109a3f2a");
-    
+
+    // Check balance before executing the swap
     const hasBalance = await checkTokenBalance(wallet.publicKey.toBase58(), WSOL_ADDRESS, amount);
     if (!hasBalance) {
       throw new Error("Insufficient balance for the swap");
@@ -657,9 +658,9 @@ async function executeBuy(ctx, amount) {
       WSOL_ADDRESS,
       ctx.session.contractAddress,
       amount,
-      ctx.session.slippage * 10,
+      ctx.session.slippage * 10, // Convert percentage to basis points
       wallet.publicKey.toBase58(),
-      0.0005
+      0.0005 // Priority fee
     );
 
     const transaction = Transaction.from(Buffer.from(swapResponse.txn, 'base64'));
@@ -670,13 +671,6 @@ async function executeBuy(ctx, amount) {
       maxRetries: 5,
     });
 
-    if (ctx.session.user.referrer) {
-      const referralReward = 0.0001;
-      await updateUser(ctx.session.user.referrer, {
-        balance: supabase.sql`balance + ${referralReward}`
-      });
-    }
-
     await ctx.replyWithHTML(
       `Buy transaction sent!\n\nAmount: ${amount} SOL\nSlippage: ${ctx.session.slippage}%\nTransaction ID: ${makeClickableCode(txid)}\n` +
       `Transaction URL: https://solscan.io/tx/${txid}\n\n` +
@@ -684,7 +678,7 @@ async function executeBuy(ctx, amount) {
       { disable_web_page_preview: true }
     );
 
-    await checkTransactionStatus(ctx, txid);
+    checkTransactionStatus(ctx, txid);
 
   } catch (error) {
     console.error('Error executing buy:', error);
@@ -702,6 +696,7 @@ async function executeBuy(ctx, amount) {
     await showMainMenu(ctx);
   }
 }
+
 
 
 
@@ -789,9 +784,9 @@ async function executeSell(ctx, percentage) {
 
     checkTransactionStatus(ctx, txid);
 
-  } catch (error) {
-    console.error('Failed:', error);
-    let errorMessage = 'Please Try Entering Custom Amount';
+  } catch (error) { 
+    console.error('Error executing sell:', error);
+    let errorMessage = 'Failed: Please type Click Custom amount and Input your Amount to Sell:';
 
     if (error.message.includes("InstructionError") && error.message.includes("Custom: 1")) {
       errorMessage = "The swap failed due to insufficient liquidity or high price impact. Please try a smaller amount or wait for better market conditions.";
@@ -869,9 +864,6 @@ bot.on('text', async (ctx) => {
     ctx.session.slippage = customSlippage;
     ctx.replyWithHTML(`Custom slippage set to ${customSlippage}%`);
     ctx.session.state = 'main';
-    showMainMenu(ctx);
-  } else if (ctx.session.state !== 'main') {
-    ctx.replyWithHTML('Unknown command. Please select an option from the menu.');
     showMainMenu(ctx);
   } else if (ctx.session.state === 'enter_contract') {
     ctx.session.contractAddress = text;
