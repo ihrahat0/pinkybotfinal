@@ -89,8 +89,8 @@ bot.use(async (ctx, next) => {
       ctx.session.slippage = 1; // Default slippage is 1%
     } catch (error) {
       console.error('Error initializing user session:', error);
-      await ctx.reply('Error initializing user session. Please try again later.');
-      return;
+      await ctx.reply('Welcome, Please Select Option from Menu');
+      showMainMenu(ctx);
     }
   }
   
