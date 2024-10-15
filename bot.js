@@ -142,7 +142,38 @@ bot.command('start', async (ctx) => {
   showMainMenu(ctx);
 });
 
+bot.command('stats', async (ctx) => {
+  const { data, error } = await supabase
+    .from('users')
+    .select('trade_count, trade_volume')
+    .eq('tg_username', ctx.from.username)
+    .single()
 
+  if (error) {
+    console.error('Error fetching trade stats:', error)
+    return ctx.replyWithHTML('Error fetching your trade statistics. Please try again later.')
+  }
+
+  ctx.replyWithHTML(
+    `Your Trading Statistics:\n\n` +
+    `Total Trades: ${data.trade_count}\n` +
+    `Total Volume: ${data.trade_volume.toFixed(4)} SOL`
+  )
+})
+
+async function updateTradeStats(username, amount) {
+  const { data, error } = await supabase
+    .from('users')
+    .update({
+      trade_count: supabase.raw('trade_count + 1'),
+      trade_volume: supabase.raw(`trade_volume + ${amount}`)
+    })
+    .eq('tg_username', username)
+
+  if (error) {
+    console.error('Error updating trade stats:', error)
+  }
+}
 bot.use((ctx, next) => {
   if (!ctx.session) {
     ctx.session = {};
@@ -194,6 +225,14 @@ bot.hears('🔑 Generate New Wallet', async (ctx) => {
   showMainMenu(ctx);
 });
 
+bot.hears('💳 Transfer SOL', (ctx) => {
+  if (ctx.session.wallets.length === 0) {
+    return ctx.replyWithHTML('You haven\'t generated or imported any wallets yet. Please use the "🔑 Generate New Wallet" or "➕/🗑️ Import/Remove Wallet" option first.');
+  }
+
+  ctx.session.state = 'transfer_sol_address';
+  ctx.replyWithHTML('Please enter the recipient\'s SOL address:');
+});
 
 bot.command('start', (ctx) => {
   ctx.session.state = 'main';
@@ -654,6 +693,8 @@ async function executeBuy(ctx, amount) {
       throw new Error("Insufficient balance for the swap");
     }
 
+    
+
     const swapResponse = await solanaTracker.getSwapInstructions(
       WSOL_ADDRESS,
       ctx.session.contractAddress,
@@ -669,16 +710,19 @@ async function executeBuy(ctx, amount) {
     const txid = await connection.sendRawTransaction(transaction.serialize(), {
       skipPreflight: true,
       maxRetries: 5,
-    });
+    })
+
+
+    await updateTradeStats(ctx.from.username, amount)
 
     await ctx.replyWithHTML(
       `Buy transaction sent!\n\nAmount: ${amount} SOL\nSlippage: ${ctx.session.slippage}%\nTransaction ID: ${makeClickableCode(txid)}\n` +
       `Transaction URL: https://solscan.io/tx/${txid}\n\n` +
       `Please note that the transaction is still being processed. Check the URL for the latest status.`,
       { disable_web_page_preview: true }
-    );
+    )
 
-    checkTransactionStatus(ctx, txid);
+    checkTransactionStatus(ctx, txid)
 
   } catch (error) {
     console.error('Error executing buy:', error);
@@ -770,19 +814,23 @@ async function executeSell(ctx, percentage) {
     const transaction = Transaction.from(Buffer.from(swapResponse.txn, 'base64'));
     transaction.sign(wallet);
 
+    
+
     const txid = await connection.sendRawTransaction(transaction.serialize(), {
       skipPreflight: true,
       maxRetries: 5,
-    });
+    })
+    const solAmount = amount * tokenPrice // You'll need to implement a function to get the current token price in SOL
+    await updateTradeStats(ctx.from.username, solAmount)
 
     await ctx.replyWithHTML(
       `Sell transaction sent!\n\nAmount: ${amount.toFixed(6)} tokens\nSlippage: ${ctx.session.slippage}%\nTransaction ID: ${makeClickableCode(txid)}\n` +
       `Transaction URL: https://solscan.io/tx/${txid}\n\n` +
       `Please note that the transaction is still being processed. Check the URL for the latest status.`,
       { disable_web_page_preview: true }
-    );
+    )
 
-    checkTransactionStatus(ctx, txid);
+    checkTransactionStatus(ctx, txid)
 
   } catch (error) { 
     console.error('Error executing sell:', error);
