@@ -2,7 +2,7 @@ import { createClient } from '@supabase/supabase-js'
 
 const supabaseUrl = 'https://wjlipffnugljjetdjjbe.supabase.co'
 const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndqbGlwZmZudWdsampldGRqamJlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mjg4MjQ1MzQsImV4cCI6MjA0NDQwMDUzNH0.9PZfUogXd3I3KJ8PQ7YI8EELq_S5am9RQnMc0BKhiAU'
-const supabase = createClient(supabaseUrl, supabaseKey)
+export const supabase = createClient(supabaseUrl, supabaseKey)
 
 export async function getUser(tg_username) {
   const { data, error } = await supabase
@@ -20,7 +20,6 @@ export async function getUser(tg_username) {
   }
   return data
 }
-
 export async function createUser(tg_username, public_wallet, PTJSON) {
   const { data, error } = await supabase
     .from('users')
@@ -82,4 +81,17 @@ export async function removeWallet(tg_username, public_key) {
 
   if (error) throw error
   return data
+}
+
+export async function getReferralCount(referrer) {
+  const { count, error } = await supabase
+    .from('users')
+    .select('*', { count: 'exact', head: true })
+    .eq('referrer', referrer)
+
+  if (error) {
+    console.error('Error fetching referral count:', error)
+    throw error
+  }
+  return count || 0
 }

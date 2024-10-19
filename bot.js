@@ -1,6 +1,6 @@
 import { Telegraf, session, Markup } from 'telegraf';
 import { swap, getBalance, generateNewWallet, getTokenAccount, createAssociatedTokenAccount} from './trade-utils.js';
-import { getUser, createUser, updateUser, addWallet, removeWallet } from './database.js';
+import { getUser, createUser, updateUser, addWallet, removeWallet, supabase, getReferralCount } from './database.js';
 import { PublicKey, Keypair, LAMPORTS_PER_SOL, Connection, Transaction, SystemProgram, sendAndConfirmTransaction } from '@solana/web3.js';
 import { 
   TOKEN_PROGRAM_ID, 
@@ -66,6 +66,10 @@ bot.use(async (ctx, next) => {
       if (user.wallets && Array.isArray(user.wallets)) {
         for (const wallet of user.wallets) {
           try {
+            if (typeof wallet.PTJSON !== 'string') {
+              console.error('Invalid wallet data:', wallet);
+              continue;
+            }
             const keypair = Keypair.fromSecretKey(bs58.decode(wallet.PTJSON));
             ctx.session.wallets.push({
               publicKey: keypair.publicKey.toBase58(),
@@ -99,6 +103,19 @@ bot.use(async (ctx, next) => {
 
 const referrals = {};
 
+async function getWalletBalance(publicKey) {
+  const balance = await connection.getBalance(new PublicKey(publicKey));
+  return balance / 1e9; // Convert lamports to SOL
+}
+
+async function getTokenAccounts(publicKey) {
+  const tokenAccounts = await connection.getParsedTokenAccountsByOwner(new PublicKey(publicKey), {
+    programId: TOKEN_PROGRAM_ID
+  });
+
+  return tokenAccounts.value;
+}
+
 // Modify the session initialization to include referral data
 bot.use(async (ctx, next) => {
   if (!ctx.session) {
@@ -120,23 +137,51 @@ bot.use(async (ctx, next) => {
   return next();
 });
 
-// Add a new handler for the Referral button
-bot.hears('Referral', (ctx) => {
+bot.hears('Referral', async (ctx) => {
   const username = ctx.from.username;
   if (!username) {
     return ctx.replyWithHTML('You need to set a Telegram username to use the referral system.');
   }
   
   const referralLink = `https://t.me/Pinky_Trading_Bot?start=${username}`;
-  ctx.replyWithHTML(`Here's your referral link: ${makeClickableCode(referralLink)}\n\nShare this link with your friends. You'll earn 0.0001 SOL for each successful trade they make!`);
+  
+  try {
+    const referralCount = await getReferralCount(username);
+
+    const message = `Here's your referral link: ${makeClickableCode(referralLink)}
+
+Share this link with your friends. You'll earn 0.0001 SOL for each successful trade they make!
+
+Total Referrals: ${referralCount}`;
+
+    ctx.replyWithHTML(message, { disable_web_page_preview: true });
+  } catch (error) {
+    console.error('Error fetching referral count:', error);
+    ctx.replyWithHTML('An error occurred while fetching your referral information. Please try again later.');
+  }
 });
 
-// Modify the start command to handle referrals
+
+async function updateReferralCount(referrer) {
+  const { error } = await supabase
+    .from('users')
+    .update({ referral_count: supabase.raw('referral_count + 1') })
+    .eq('tg_username', referrer);
+
+  if (error) {
+    console.error('Error updating referral count:', error);
+  }
+}
+
 bot.command('start', async (ctx) => {
   const referrer = ctx.message.text.split(' ')[1];
   if (referrer && referrer !== ctx.from.username) {
-    await updateUser(ctx.from.username, { referrer });
-    ctx.replyWithHTML(`Welcome! You were referred by @${referrer}.`);
+    try {
+      await updateUser(ctx.from.username, { referrer });
+      ctx.replyWithHTML(`Welcome! You were referred by @${referrer}.`);
+    } catch (error) {
+      console.error('Error updating user with referrer:', error);
+    }
   }
   ctx.session.state = 'main';
   showMainMenu(ctx);
@@ -378,6 +423,8 @@ async function getTokenMetadata(mintAddress) {
   
   // Fallback to Solana Token List
   try {
+    const mintPublicKey = new PublicKey(mintAddress);
+    const nft = await metaplex.nfts().findByMint({ mintAddress: mintPublicKey });
     const provider = await new TokenListProvider().resolve();
     const tokenList = provider.filterByChainId(ENV.MainnetBeta).getList();
     const tokenMap = tokenList.reduce((map, item) => {
@@ -461,7 +508,40 @@ bot.hears('👛 Wallet', async (ctx) => {
   }
 });
 
+async function getPortfolio(ctx) {
+  try {
+    const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
+    const publicKey = activeWallet.publicKey;
 
+    const solBalance = await getWalletBalance(publicKey);
+    const tokenAccounts = await getTokenAccounts(publicKey);
+
+    let portfolioMessage = `📊 Portfolio for ${makeClickableCode(publicKey)}\n\n`;
+    portfolioMessage += `SOL Balance: ${solBalance.toFixed(4)} SOL\n\n`;
+    portfolioMessage += `Tokens:\n`;
+
+    for (const account of tokenAccounts) {
+      const { mint, tokenAmount } = account.account.data.parsed.info;
+      if (tokenAmount.uiAmount > 0) {
+        const metadata = await getTokenMetadata(mint);
+        portfolioMessage += `${metadata.name} (${metadata.symbol}): ${tokenAmount.uiAmount}\n`;
+      }
+    }
+
+    await ctx.replyWithHTML(portfolioMessage, { disable_web_page_preview: true });
+  } catch (error) {
+    console.error('Error fetching portfolio:', error);
+    await ctx.replyWithHTML('Error fetching portfolio. Please try again later.');
+  }
+}
+
+bot.hears('📊 Portfolio', async (ctx) => {
+  if (ctx.session.wallets.length === 0) {
+    return ctx.replyWithHTML('You haven\'t generated or imported any wallets yet. Please use the "🔑 Generate New Wallet" or "➕/🗑️ Import/Remove Wallet" option first.');
+  }
+
+  await getPortfolio(ctx);
+});
 
   bot.action(/slippage_(\d+)/, (ctx) => {
     const slippage = parseInt(ctx.match[1]);
@@ -734,6 +814,10 @@ async function executeBuy(ctx, amount) {
     ctx.session.state = 'main';
     await showMainMenu(ctx);
   }
+  if (ctx.session.state === 'enter_sell_contract') {
+    await handleSellContract(ctx, ctx.message.text);
+  }
+
 }
 
 
@@ -759,26 +843,21 @@ async function executeSell(ctx, percentage) {
     const solanaTracker = new SolanaTracker(wallet, "https://api.mainnet-beta.solana.com", "YOUR_API_KEY");
 
     const tokenMint = new PublicKey(ctx.session.contractAddress);
-    const tokenAccount = await getAssociatedTokenAddress(
-      tokenMint,
-      wallet.publicKey,
-      false,
-      TOKEN_PROGRAM_ID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
+    const tokenAccounts = await getTokenAccounts(wallet.publicKey.toBase58());
     
-    let tokenAccountInfo;
-    try {
-      tokenAccountInfo = await getAccount(connection, tokenAccount);
-    } catch (error) {
-      if (error.name === 'TokenAccountNotFoundError') {
-        await ctx.replyWithHTML(`You don't have any balance of this token in your wallet.`);
-        return;
-      }
-      throw error;
+    const tokenAccount = tokenAccounts.find(account => account.account.data.parsed.info.mint === tokenMint.toBase58());
+    
+    if (!tokenAccount) {
+      await ctx.replyWithHTML(`You don't have any balance of this token in your wallet.`);
+      return;
     }
 
-    const tokenBalance = Number(tokenAccountInfo.amount) / Math.pow(10, tokenAccountInfo.decimals);
+    const tokenBalance = tokenAccount.account.data.parsed.info.tokenAmount.uiAmount;
+
+    if (isNaN(tokenBalance) || tokenBalance <= 0) {
+      await ctx.replyWithHTML(`Error: Unable to retrieve token balance or balance is zero. Current balance: ${tokenBalance}`);
+      return;
+    }
 
     let amount;
     if (percentage === 'custom') {
@@ -796,6 +875,9 @@ async function executeSell(ctx, percentage) {
       await ctx.replyWithHTML(`Invalid amount. The amount to sell must be greater than zero.`);
       return;
     }
+
+
+    await ctx.replyWithHTML(`Please wait while Executing Trade for ${amount.toFixed(6)} ${ctx.session.tokenSymbol || 'tokens'}`);
 
     const swapResponse = await solanaTracker.getSwapInstructions(
       ctx.session.contractAddress,
@@ -815,13 +897,13 @@ async function executeSell(ctx, percentage) {
     });
 
     await ctx.replyWithHTML(
-      `Sell transaction sent!\n\nAmount: ${amount.toFixed(6)} tokens\nSlippage: ${ctx.session.slippage}%\nTransaction ID: ${makeClickableCode(txid)}\n` +
+      `Sell transaction sent!\n\nAmount: ${amount.toFixed(6)} ${ctx.session.tokenSymbol || 'tokens'}\nSlippage: ${ctx.session.slippage}%\nTransaction ID: ${makeClickableCode(txid)}\n` +
       `Transaction URL: https://solscan.io/tx/${txid}\n\n` +
       `Please note that the transaction is still being processed. Check the URL for the latest status.`,
       { disable_web_page_preview: true }
     );
 
-    checkTransactionStatus(ctx, txid);
+    await checkTransactionStatus(ctx, txid);
 
   } catch (error) {
     console.error('Error executing sell:', error);
@@ -841,8 +923,26 @@ async function executeSell(ctx, percentage) {
 }
 
 
+
+async function handleSellContract(ctx, contractAddress) {
+  ctx.session.contractAddress = contractAddress;
+  try {
+    await sendTokenInfo(ctx, contractAddress);
+    ctx.session.state = 'select_sell_amount';
+    ctx.replyWithHTML('Select the amount of tokens you want to sell:', Markup.inlineKeyboard([
+      [Markup.button.callback('25%', 'sell_25'), Markup.button.callback('50%', 'sell_50'), Markup.button.callback('100%', 'sell_100')],
+      [Markup.button.callback('Custom Amount', 'sell_custom')]
+    ]));
+  } catch (error) {
+    ctx.replyWithHTML(`Error fetching token info: ${error.message}`);
+    ctx.session.state = 'main';
+    showMainMenu(ctx);
+  }
+}
+// Modify the checkTransactionStatus function to provide more detailed feedback
 async function checkTransactionStatus(ctx, txid) {
   try {
+    await ctx.replyWithHTML(`Checking transaction status...`);
     const status = await connection.confirmTransaction(txid, 'confirmed');
     if (status.value.err) {
       await ctx.replyWithHTML(`Transaction failed. Please check the transaction details: https://solscan.io/tx/${txid}`, { disable_web_page_preview: true });
@@ -851,6 +951,7 @@ async function checkTransactionStatus(ctx, txid) {
     }
   } catch (error) {
     console.error('Error checking transaction status:', error);
+    await ctx.replyWithHTML(`Make sure you Have Enough Balance. Please check Your Transaction manually: https://solscan.io/tx/${txid}`, { disable_web_page_preview: true });
   }
 }
 
@@ -993,6 +1094,14 @@ bot.on('text', async (ctx) => {
     ctx.replyWithHTML('Unknown command. Please select an option from the menu.');
     showMainMenu(ctx);
   }
+  else if (ctx.session.state === 'enter_sell_amount') {
+    const amount = parseFloat(ctx.message.text);
+    if (isNaN(amount)) {
+      return ctx.replyWithHTML('Invalid amount. Please enter a valid number.');
+    }
+    ctx.session.customSellAmount = amount;
+    await executeSell(ctx, 'custom');
+  }
 });
 
 bot.action(/buy_(.+)/, async (ctx) => {
@@ -1021,7 +1130,6 @@ bot.action('sell_custom', (ctx) => {
   ctx.answerCbQuery();
   ctx.replyWithHTML('Please enter the custom amount of tokens you want to sell:');
 });
-
 
 async function executeTransferSOL(ctx, amount) {
   try {
