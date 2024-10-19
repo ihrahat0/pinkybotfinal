@@ -685,15 +685,13 @@ async function executeBuy(ctx, amount) {
   try {
     const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
     const wallet = Keypair.fromSecretKey(bs58.decode(activeWallet.privateKey));
-    const solanaTracker = new SolanaTracker(wallet, "https://rpc-mainnet.solanatracker.io/?api_key=e891a957-8d59-4888-89fe-8ee2109a3f2a", "e891a957-8d59-4888-89fe-8ee2109a3f2a");
+    const solanaTracker = new SolanaTracker(wallet, "https://api.mainnet-beta.solana.com", "YOUR_API_KEY");
 
     // Check balance before executing the swap
     const hasBalance = await checkTokenBalance(wallet.publicKey.toBase58(), WSOL_ADDRESS, amount);
     if (!hasBalance) {
       throw new Error("Insufficient balance for the swap");
     }
-
-    
 
     const swapResponse = await solanaTracker.getSwapInstructions(
       WSOL_ADDRESS,
@@ -710,19 +708,16 @@ async function executeBuy(ctx, amount) {
     const txid = await connection.sendRawTransaction(transaction.serialize(), {
       skipPreflight: true,
       maxRetries: 5,
-    })
-
-
-    await updateTradeStats(ctx.from.username, amount)
+    });
 
     await ctx.replyWithHTML(
       `Buy transaction sent!\n\nAmount: ${amount} SOL\nSlippage: ${ctx.session.slippage}%\nTransaction ID: ${makeClickableCode(txid)}\n` +
       `Transaction URL: https://solscan.io/tx/${txid}\n\n` +
       `Please note that the transaction is still being processed. Check the URL for the latest status.`,
       { disable_web_page_preview: true }
-    )
+    );
 
-    checkTransactionStatus(ctx, txid)
+    checkTransactionStatus(ctx, txid);
 
   } catch (error) {
     console.error('Error executing buy:', error);
@@ -761,7 +756,7 @@ async function executeSell(ctx, percentage) {
   try {
     const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
     const wallet = Keypair.fromSecretKey(bs58.decode(activeWallet.privateKey));
-    const solanaTracker = new SolanaTracker(wallet, "https://rpc-mainnet.solanatracker.io/?api_key=e891a957-8d59-4888-89fe-8ee2109a3f2a", "e891a957-8d59-4888-89fe-8ee2109a3f2a");
+    const solanaTracker = new SolanaTracker(wallet, "https://api.mainnet-beta.solana.com", "YOUR_API_KEY");
 
     const tokenMint = new PublicKey(ctx.session.contractAddress);
     const tokenAccount = await getAssociatedTokenAddress(
@@ -814,27 +809,23 @@ async function executeSell(ctx, percentage) {
     const transaction = Transaction.from(Buffer.from(swapResponse.txn, 'base64'));
     transaction.sign(wallet);
 
-    
-
     const txid = await connection.sendRawTransaction(transaction.serialize(), {
       skipPreflight: true,
       maxRetries: 5,
-    })
-    const solAmount = amount * tokenPrice // You'll need to implement a function to get the current token price in SOL
-    await updateTradeStats(ctx.from.username, solAmount)
+    });
 
     await ctx.replyWithHTML(
       `Sell transaction sent!\n\nAmount: ${amount.toFixed(6)} tokens\nSlippage: ${ctx.session.slippage}%\nTransaction ID: ${makeClickableCode(txid)}\n` +
       `Transaction URL: https://solscan.io/tx/${txid}\n\n` +
       `Please note that the transaction is still being processed. Check the URL for the latest status.`,
       { disable_web_page_preview: true }
-    )
+    );
 
-    checkTransactionStatus(ctx, txid)
+    checkTransactionStatus(ctx, txid);
 
-  } catch (error) { 
+  } catch (error) {
     console.error('Error executing sell:', error);
-    let errorMessage = 'Failed: Please type Click Custom amount and Input your Amount to Sell:';
+    let errorMessage = 'An unexpected error occurred. Please try again later or contact support.';
 
     if (error.message.includes("InstructionError") && error.message.includes("Custom: 1")) {
       errorMessage = "The swap failed due to insufficient liquidity or high price impact. Please try a smaller amount or wait for better market conditions.";
