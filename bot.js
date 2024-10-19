@@ -280,7 +280,7 @@ bot.hears('🔙 Main Menu', (ctx) => {
     try {
       const balance = await getBalance(publicKey);
       if (isSol) {
-        if (balance < amount + 0.001) { // 0.001 SOL for transaction fee
+        if (balance < amount + 0.008) { // 0.001 SOL for transaction fee
           return { sufficient: false, balance };
         }
       } else {
@@ -699,7 +699,7 @@ async function executeBuy(ctx, amount) {
       amount,
       ctx.session.slippage * 10, // Convert percentage to basis points
       wallet.publicKey.toBase58(),
-      0.0005 // Priority fee
+      0.005 // Priority fee
     );
 
     const transaction = Transaction.from(Buffer.from(swapResponse.txn, 'base64'));
@@ -1004,7 +1004,7 @@ bot.action(/buy_(.+)/, async (ctx) => {
   } else if (amount === 'max') {
     const activeWallet = ctx.session.wallets[ctx.session.activeWalletIndex];
     const balance = await connection.getBalance(new PublicKey(activeWallet.publicKey));
-    const maxAmount = Math.max(0, balance / LAMPORTS_PER_SOL - 0.001).toFixed(3); // Deduct 0.001 SOL for fees
+    const maxAmount = Math.max(0, balance / LAMPORTS_PER_SOL - 0.008).toFixed(3); // Deduct 0.001 SOL for fees
     await executeBuy(ctx, parseFloat(maxAmount));
   } else {
     await executeBuy(ctx, parseFloat(amount));
